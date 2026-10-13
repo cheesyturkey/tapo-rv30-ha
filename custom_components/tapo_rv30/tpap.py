@@ -413,6 +413,10 @@ class TapoVacuumClient:
     def resume(self) -> None:
         self.send("setRobotPause", {"pause": False})
 
+    def locate(self) -> None:
+        # The app's "find my robot" (PlaySelectAudioParams seek_me preset).
+        self.send("playSelectAudio", {"audio_type": "seek_me"})
+
     def dock(self) -> None:
         self.send("setSwitchCharge", {"switch_charge": True})
 
@@ -439,3 +443,73 @@ class TapoVacuumClient:
         cur = self.send("getCleanAttr", {"type": "global"})["result"]
         cur["cistern"] = value; cur["type"] = "global"
         self.send("setCleanAttr", cur)
+
+    # ---- Settings & extras (names from the decompiled Tapo app, 2026-10-13) ----
+    _SETTINGS = (("dust", "getDustCollectionInfo"), ("dnd", "getDoNotDisturb"),
+                 ("volume", "getVolume"), ("child_lock", "getChildLockInfo"),
+                 ("carpet_boost", "getCarpetAutoBoost"), ("records", "getCleanRecords"))
+
+    def get_settings(self) -> dict:
+        """Slow-changing settings; a getter the model doesn't support is just left out."""
+        out = {}
+        for key, method in self._SETTINGS:
+            try:
+                out[key] = self.send(method)["result"]
+            except Exception as exc:
+                _LOGGER.debug("%s failed: %s", method, exc)
+        return out
+
+    def _merge_set(self, getter: str, setter: str, **changes) -> None:
+        cur = self.send(getter)["result"]
+        cur.update(changes)
+        self.send(setter, cur)
+
+    def empty_bin(self) -> None:
+        self.send("setSwitchDustCollection", {"switch_dust_collection": True})
+
+    def set_auto_empty(self, on: bool) -> None:
+        self._merge_set("getDustCollectionInfo", "setDustCollectionInfo", auto_dust_collection=on)
+
+    def set_dnd(self, **changes) -> None:  # do_not_disturb / s_min / e_min (minutes after midnight)
+        self._merge_set("getDoNotDisturb", "setDoNotDisturb", **changes)
+
+    def set_volume(self, value: int) -> None:
+        self.send("setVolume", {"volume": value})
+
+    def set_child_lock(self, on: bool) -> None:
+        self.send("setChildLockInfo", {"child_lock_status": on})
+
+    def set_carpet_boost(self, on: bool) -> None:
+        self.send("setCarpetAutoBoost", {"auto_boost": on})
+
+    def reset_consumable(self, part: str) -> None:  # e.g. "roll_brush" (field name minus _time)
+        self.send("resetConsumablesTime", {"reset_list": [part]})
+
+    def set_room_settings(self, map_id: int, changes: dict[int, dict]) -> None:
+        """The app sends every room with type 'custom'; unchanged rooms keep their values."""
+        rooms = [a for a in self.get_map_data(map_id).get("area_list", []) if a.get("type") == "room"]
+        self.send("setCleanAttr", {"type": "custom", "area_list": [
+            {"id": r["id"], "type": "room", "suction": r.get("suction"),
+             "cistern": r.get("cistern"), "clean_number": r.get("clean_number"),
+             **changes.get(r["id"], {})}
+            for r in rooms]})
+
+    def clean_zones(self, map_id: int, zones: list[list[int]],
+                    suction: int, cistern: int, passes: int) -> None:
+        """Zones are [x1, y1, x2, y2] rectangles in the map's real coordinates (mm)."""
+        self.send("setSwitchClean", {
+            "clean_on": True, "clean_mode": 4, "map_id": map_id,
+            "clean_order": False, "force_clean": False, "start_type": 1,
+            "area_list": [{"id": i + 1, "type": "area",
+                           "vertexs": [[x1, y1], [x2, y1], [x2, y2], [x1, y2]],
+                           "suction": suction, "cistern": cistern, "clean_number": passes}
+                          for i, (x1, y1, x2, y2) in enumerate(zones)],
+        })
+
+    def clean_spot(self) -> None:
+        """The app's spot clean: a 1.5 m square (+-750) around a point - here, the robot."""
+        map_id, _ = self.get_map_info()
+        x, y = self.get_map_data(map_id)["real_vac_coor"][:2]
+        g = self.send("getCleanAttr", {"type": "global"})["result"]
+        self.clean_zones(map_id, [[x - 750, y - 750, x + 750, y + 750]],
+                         g.get("suction", 3), g.get("cistern", 0), 1)

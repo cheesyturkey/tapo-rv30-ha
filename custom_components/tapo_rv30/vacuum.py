@@ -35,6 +35,8 @@ _FEATURES = (
     | VacuumEntityFeature.BATTERY
     | VacuumEntityFeature.STATE
     | VacuumEntityFeature.MAP
+    | VacuumEntityFeature.LOCATE
+    | VacuumEntityFeature.CLEAN_SPOT
 )
 
 
@@ -98,6 +100,7 @@ class TapoVacuumEntity(CoordinatorEntity[TapoCoordinator], StateVacuumEntity):
             "clean_time_min":d.get("clean_time", 0),
             "clean_percent": d.get("clean_percent", 0),
             "rooms":         rooms,
+            "position_mm":   (self.coordinator.vac_pos or [None, None])[:2],
             "integration":   DOMAIN,
         }
 
@@ -121,6 +124,13 @@ class TapoVacuumEntity(CoordinatorEntity[TapoCoordinator], StateVacuumEntity):
     async def async_stop(self, **kwargs: Any) -> None:
         await self.hass.async_add_executor_job(self.coordinator.client.stop)
         self._refresh_soon()
+
+    async def async_clean_spot(self, **kwargs: Any) -> None:
+        await self.hass.async_add_executor_job(self.coordinator.client.clean_spot)
+        self._refresh_soon()
+
+    async def async_locate(self, **kwargs: Any) -> None:
+        await self.hass.async_add_executor_job(self.coordinator.client.locate)
 
     async def async_return_to_base(self, **kwargs: Any) -> None:
         await self.hass.async_add_executor_job(self.coordinator.client.dock)
