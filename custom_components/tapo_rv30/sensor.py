@@ -22,7 +22,7 @@ from .const import (
     CONSUMABLE_LIMITS_H,
     DOMAIN,
     ERROR_CODES,
-    VACUUM_STATES,
+    STATUS_LABELS,
     WATER_INT_TO_NAME,
     FAN_INT_TO_NAME,
 )
@@ -40,7 +40,7 @@ _STATUS_SENSOR = TapoSensorDescription(
     key="status",
     name="Status",
     icon="mdi:robot-vacuum",
-    value_fn=lambda d: VACUUM_STATES.get(d.get("status_code", 0), "idle").replace("_", " ").title(),
+    value_fn=lambda d: STATUS_LABELS.get(d.get("status_code", 0), f"Code({d.get('status_code')})"),
 )
 
 _BATTERY_SENSOR = TapoSensorDescription(

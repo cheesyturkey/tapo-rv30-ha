@@ -11,6 +11,7 @@ import pickle
 import secrets
 import struct
 import tempfile
+import threading
 import warnings
 from pathlib import Path
 
@@ -23,6 +24,8 @@ from cryptography.hazmat.primitives.cmac import CMAC
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from ecdsa import NIST256p, ellipticcurve
 from urllib3.exceptions import InsecureRequestWarning
+
+from .const import DOCKED_CODES
 
 warnings.filterwarnings("ignore", category=InsecureRequestWarning)
 _LOGGER = logging.getLogger(__name__)
@@ -159,6 +162,9 @@ class TapoVacuumClient:
         self._http    = requests.Session()
         self._http.verify = False
         self._cache   = Path(tempfile.gettempdir()) / f"tapo_rv30_{host}.pkl"
+        # HA calls us from several executor threads (poll + commands); the session
+        # seq/nonce is shared state, so one request at a time.
+        self._lock    = threading.RLock()
 
         self._device_mac = ""
         self._tpap_pake: list[int] = []
@@ -303,6 +309,10 @@ class TapoVacuumClient:
 
     # ---- Send ----------------------------------------------------------------
     def send(self, method: str, params: dict | None = None) -> dict:
+        with self._lock:
+            return self._send(method, params)
+
+    def _send(self, method: str, params: dict | None = None) -> dict:
         """Send an encrypted request. Re-auths once on session expiry."""
         self._ensure_auth()
         for attempt in range(2):
@@ -371,7 +381,13 @@ class TapoVacuumClient:
     def get_map_data(self, map_id: int) -> dict:
         return self.send("getMapData", {"map_id": map_id})["result"]
 
+    def _status(self) -> int:
+        return self.send("getVacStatus")["result"].get("status")
+
     def start(self) -> None:
+        # Paused mid-job: the robot rejects a new setSwitchClean (-3002), so resume the job instead.
+        if self._status() == 7:
+            return self.resume()
         self.send("setSwitchClean", {
             "clean_mode": 0, "clean_on": True,
             "clean_order": True, "force_clean": False,
@@ -389,8 +405,7 @@ class TapoVacuumClient:
         })
 
     def pause(self) -> None:
-        status = self.send("getVacStatus")["result"].get("status")
-        if status == 4:
+        if self._status() == 4:
             self.send("setSwitchCharge", {"switch_charge": False})
         else:
             self.send("setRobotPause", {"pause": True})
@@ -402,7 +417,17 @@ class TapoVacuumClient:
         self.send("setSwitchCharge", {"switch_charge": True})
 
     def stop(self) -> None:
-        self.pause()
+        """End the job (stop used to be pause, leaving the robot 'paused' forever)."""
+        status = self._status()
+        if status in DOCKED_CODES:  # at the dock (incl. 9 emptying dust): nothing to stop
+            return
+        if status == 4:  # returning: cancel the trip home
+            self.send("setSwitchCharge", {"switch_charge": False})
+            return
+        try:
+            self.send("setSwitchClean", {"clean_on": False})
+        except RuntimeError:
+            self.send("setRobotPause", {"pause": True})  # at least halt it
 
     def set_fan_speed(self, value: int) -> None:
         self.send("setCleanAttr", {"suction": value, "type": "global"})
